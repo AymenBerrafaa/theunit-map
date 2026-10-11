@@ -1,0 +1,59 @@
+# THEUNIT navigation files (spec 3.10, phase 8c): Valhalla routing tiles + offline search index for Tunisia,
+# built from the Geofabrik OpenStreetMap extract and added to the map release named in release.txt.
+# Free: GitHub Actions on a public repo. Runs when this file, tools/ or release.txt change, or by hand.
+name: Build navigation files
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/build.yml', 'tools/**', 'release.txt']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tunisia OpenStreetMap extract (Geofabrik)
+        run: |
+          curl -fsSL -o tunisia.osm.pbf https://download.geofabrik.de/africa/tunisia-latest.osm.pbf
+          ls -l tunisia.osm.pbf
+          echo "STAMP=$(date -u +%Y%m%d)" >> "$GITHUB_ENV"
+          echo "TAG=$(tr -d ' \r\n' < release.txt)" >> "$GITHUB_ENV"
+
+      - name: Valhalla 3.9.1 routing tiles
+        run: |
+          mkdir -p vh && chmod 777 vh && cp tunisia.osm.pbf vh/
+          docker run --rm --user root -v "$PWD/vh:/data" ghcr.io/valhalla/valhalla:3.9.1 bash -euc '
+            valhalla_build_config --mjolnir-tile-dir /data/tiles --mjolnir-tile-extract /data/tiles.tar \
+              --mjolnir-admin /data/admins.sqlite --mjolnir-timezone /data/tz.sqlite > /data/valhalla.json
+            valhalla_build_admins -c /data/valhalla.json /data/tunisia.osm.pbf
+            valhalla_build_tiles -c /data/valhalla.json /data/tunisia.osm.pbf
+            valhalla_build_extract -c /data/valhalla.json -v
+          '
+          mv vh/tiles.tar "tunisia-$STAMP.valhalla.tar"
+          ls -l "tunisia-$STAMP.valhalla.tar"
+
+      - name: Offline search index
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq osmium-tool
+          osmium tags-filter tunisia.osm.pbf nwr/place nw/highway nwr/amenity nwr/shop nwr/tourism nwr/leisure \
+            nwr/aeroway=aerodrome nwr/railway=station -o named.osm.pbf
+          osmium export named.osm.pbf -f geojsonseq -o named.geojsonseq -a type,id
+          python3 tools/search_index.py named.geojsonseq "tunisia-$STAMP.search.sqlite"
+          ls -l "tunisia-$STAMP.search.sqlite"
+
+      - name: Add to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$TAG" "tunisia-$STAMP.valhalla.tar" "tunisia-$STAMP.search.sqlite" --clobber
+          {
+            echo "### Navigation files for $TAG"
+            ls -l tunisia-*.valhalla.tar tunisia-*.search.sqlite
+          } >> "$GITHUB_STEP_SUMMARY"
